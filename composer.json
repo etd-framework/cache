@@ -1,0 +1,24 @@
+{
+  "name": "etdsolutions/cache",
+  "minimum-stability": "dev",
+  "description": "Package Cache du Framework ETD",
+  "homepage": "https://github.com/etd-framework/cache",
+  "license": "Apache-2.0",
+  "authors": [
+    {
+      "name": "Jean-Baptiste Alleaume",
+      "email": "jb.alleaume@etd-solutions.com",
+      "homepage": "http://alleau.me",
+      "role": "Manager"
+    }
+  ],
+  "require": {
+    "php": ">=5.4",
+    "joomla/cache": "~2.0@dev"
+  },
+  "autoload": {
+    "psr-4": {
+      "EtdSolutions\\Cache\\": "src/"
+    }
+  }
+}
