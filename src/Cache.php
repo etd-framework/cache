@@ -77,7 +77,10 @@ class Cache implements ContainerAwareInterface {
                 $class = "\\Joomla\\Cache\\Adapter\\File";
                 break;
             case 'memcached':
-                $class = "\\EtdSolutions\\Cache\\Adapter\\Memcached";
+                $class = "\\Joomla\\Cache\\Adapter\\Memcached";
+                break;
+            case 'memcachesasl':
+                $class = "\\EtdSolutions\\Cache\\Adapter\\MemcacheSASL";
                 break;
             case 'redis':
                 $class = "\\Joomla\\Cache\\Adapter\\Redis";
@@ -110,6 +113,7 @@ class Cache implements ContainerAwareInterface {
         // On instancie les drivers si besoin.
         if ($adapter_name == "memcached") {
             $mc = new \Memcached($this->options['persistent_id']);
+            $mc->setOption(\Memcached::OPT_BINARY_PROTOCOL, false);
             if (!count($mc->getServerList()) && isset($this->options['servers']) && is_array($this->options['servers'])) {
                 $mc->addServers($this->options['servers']);
             }
@@ -196,17 +200,28 @@ class Cache implements ContainerAwareInterface {
      * @param   mixed  $data  Les données à mettre en cache
      * @param   string $id    L'identifiant
      * @param   string $group Le groupe
+     * @param   int    $ttl   Une durée de vie optionnelle.
      *
      * @return  boolean  True si les données ont été mises en cache.
      */
-    public function set($data, $id, $group = null) {
+    public function set($data, $id, $group = null, $ttl = null) {
 
-        // On récupère le groupe.
+        if (!$this->lockIndex()) {
+            return false;
+        }
+
+        // On récupère les paramètres.
         $group = isset($group) ? $group : $this->default_group;
+        $ttl   = isset($ttl) ? $ttl : $this->ttl;
+        $id    = $this->getCacheId($id, $group);
 
         // On crée l'élément de cache.
-        $item = new Item($this->getCacheId($id, $group), $this->ttl);
+        $item = new Item($id, $ttl);
         $item->set($data);
+
+        // On ajoute notre identifiant à l'index des clés.
+        $this->appendToIndex($id);
+        $this->unlockIndex();
 
         return $this->adapter->save($item);
     }
@@ -221,10 +236,17 @@ class Cache implements ContainerAwareInterface {
      */
     public function delete($id, $group = null) {
 
+        if (!$this->lockIndex()) {
+            return false;
+        }
+
         // On récupère le groupe.
         $group = isset($group) ? $group : $this->default_group;
+        $id    = $this->getCacheId($id, $group);error_log($id);
 
-        return $this->adapter->deleteItem($this->getCacheId($id, $group));
+        $this->removeFromIndex($id);
+
+        return $this->adapter->deleteItem($id);
     }
 
     /**
@@ -241,20 +263,109 @@ class Cache implements ContainerAwareInterface {
      */
     public function clean($group, $mode = null) {
 
-        $keys     = $this->adapter->getKeys();
-        $todelete = [];
-
-        foreach ($keys as $key) {
-            if (strpos($key, $this->context . '-cache-' . $group . '-') === 0 xor $mode != 'group') {
-                $todelete[] = $key;
-            }
-        }
-
-        if (!empty($todelete) && !$this->adapter->deleteItems($todelete)) {
+        if (!$this->lockIndex()) {
             return false;
         }
 
+        $index = $this->getIndex();
+        $arr   = $index->get();
+
+        foreach ($arr as $k => $key) {
+            if (strpos($key, $this->context . '-cache-' . $group . '-') === 0 xor $mode != 'group') {
+                $this->adapter->deleteItem($key);
+                unset($arr[$k]);
+            }
+        }
+
+        $index->set($arr);
+        $this->adapter->save($index);
+        $this->unlockIndex();
+
         return true;
+    }
+
+    protected function getIndex() {
+
+        $index = $this->adapter->getItem($this->context . '-index');
+
+        if (!$index->isHit()) {
+            $index->expiresAfter(999999999);
+            $index->set([]);
+        }
+
+        return $index;
+    }
+
+    protected function appendToIndex($id) {
+
+        $index = $this->getIndex();
+        $arr   = $index->get();
+
+        if (!in_array($id, $arr)) {
+            $arr[] = $id;
+            $index->set($arr);
+            return $this->adapter->save($index);
+        }
+
+        return true;
+
+    }
+
+    protected function removeFromIndex($id) {
+
+        $index = $this->getIndex();
+        $arr   = $index->get();
+
+        if (($key = array_search($id, $arr)) !== false) {
+            unset($arr[$key]);
+        }
+
+        $index->set($arr);
+        return $this->adapter->save($index);
+
+    }
+
+    /**
+     * Lock cache index
+     *
+     * @return  boolean  True on success, false otherwise.
+     */
+    protected function lockIndex() {
+
+        $looptime = 300;
+        $lock = new Item($this->context . '-index_lock', 30);
+        $lock->set(1);
+        $data_lock = $this->adapter->save($lock);
+
+        if ($data_lock === false) {
+            $lock_counter = 0;
+
+            // Loop until you find that the lock has been released.  that implies that data get from other thread has finished
+            while ($data_lock === false) {
+                if ($lock_counter > $looptime) {
+                    return false;
+                    break;
+                }
+
+                usleep(100);
+                $data_lock = $this->adapter->save($lock);
+                $lock_counter++;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Unlock cache index
+     *
+     * @return  boolean  True on success, false otherwise.
+     *
+     * @since   12.1
+     */
+    protected function unlockIndex() {
+
+        return $this->adapter->deleteItem($this->context . '-index_lock');
     }
 
     /**
